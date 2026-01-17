@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import DrawingCanvas from './components/DrawingCanvas';
 import BeadTracker from './components/BeadTracker/BeadTracker';
 import ProcessVisualization from './components/ProcessVisualization';
 import axios from 'axios';
+import { getHEInstance } from './utils/encryption';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8001';
 
@@ -25,6 +26,23 @@ function App() {
     inference: null,
     output: null
   });
+  const [heInitialized, setHeInitialized] = useState(false);
+
+  // Initialize HE system on mount
+  useEffect(() => {
+    const initHE = async () => {
+      try {
+        const he = getHEInstance();
+        await he.initialize();
+        setHeInitialized(true);
+        console.log('HE system initialized successfully');
+      } catch (err) {
+        console.error('Failed to initialize HE:', err);
+        setError('Failed to initialize encryption system');
+      }
+    };
+    initHE();
+  }, []);
 
   const updateStage = (stageName, status, details = {}) => {
     setStages(prev => ({
@@ -65,40 +83,34 @@ function App() {
       return;
     }
 
+    if (!heInitialized) {
+      alert('Encryption system not ready. Please wait...');
+      return;
+    }
+
     setIsProcessing(true);
     setError(null);
     const startTime = Date.now();
 
-    let encryptedBase64 = '';
     try {
       updateStage('encryption', 'in-progress');
+      const he = getHEInstance();
 
-      const keyArray = new Uint8Array(32);
-      crypto.getRandomValues(keyArray);
-      const keyBase64 = btoa(String.fromCharCode(...keyArray));
-
-      // Proper UTF-8 base64 encoding
-      const dataStr = JSON.stringify(imageData);
-      const encoder = new TextEncoder();
-      const dataBytes = encoder.encode(dataStr);
-      const encodedBinary = Array.from(dataBytes, byte => String.fromCharCode(byte)).join('');
-      encryptedBase64 = btoa(encodedBinary);
-
-      await new Promise(resolve => setTimeout(resolve, 200));
+      // Encrypt image using HE utilities
+      const encryptedImage = await he.encryptImage(imageData);
 
       updateStage('encryption', 'completed', {
-        duration: 200,
-        scheme: 'Base64 Encoding (Demo)',
-        keyPreview: keyBase64.substring(0, 24) + '...'
+        duration: Date.now() - startTime,
+        scheme: he.getSchemeInfo()?.scheme || 'CKKS (TenSEAL)',
+        keyPreview: he.getPublicKey()?.substring(0, 24) + '...'
       });
 
       updateStage('transmission', 'in-progress');
       const transmissionStart = Date.now();
 
-      const inferenceResponse = await axios.post(`${API_URL}/predict_encrypted`, {
-        encrypted_data: encryptedBase64,
-        key: keyBase64,
-        algorithm: 'Base64'
+      // Call the real HE inference endpoint
+      const inferenceResponse = await axios.post(`${API_URL}/encryption/predict_encrypted`, {
+        encrypted_image: encryptedImage
       });
 
       const transmissionTime = Date.now() - transmissionStart;
@@ -110,9 +122,9 @@ function App() {
       setProcessData(prev => ({
         ...prev,
         encrypted: {
-          data: encryptedBase64.substring(0, 100) + '...',
-          fullData: encryptedBase64,
-          keyPreview: keyBase64.substring(0, 24) + '...'
+          data: encryptedImage.substring(0, 100) + '...',
+          fullData: encryptedImage,
+          keyPreview: he.getPublicKey()?.substring(0, 24) + '...'
         }
       }));
 
@@ -131,16 +143,9 @@ function App() {
 
       updateStage('decryption', 'in-progress');
 
+      // Decrypt the result using HE utilities
       const encryptedResult = inferenceResponse.data.encrypted_result;
-      // Proper UTF-8 base64 decoding
-      const decodedBinary = atob(encryptedResult);
-      const bytes = new Uint8Array(decodedBinary.length);
-      for (let i = 0; i < decodedBinary.length; i++) {
-        bytes[i] = decodedBinary.charCodeAt(i);
-      }
-      const decoder = new TextDecoder();
-      const decodedStr = decoder.decode(bytes);
-      const decryptedResult = JSON.parse(decodedStr);
+      const decryptedResult = await he.decryptResult(encryptedResult);
 
       await new Promise(resolve => setTimeout(resolve, 100));
       updateStage('decryption', 'completed', {
@@ -150,7 +155,7 @@ function App() {
       const prediction = decryptedResult.prediction ?? 0;
       const confidence = decryptedResult.confidence ?? 0;
       const probs = decryptedResult.probabilities ?? [];
-      const logits = decryptedResult.logits ?? [];
+      const logits = [];
 
       setProcessData(prev => ({
         ...prev,
@@ -190,6 +195,11 @@ function App() {
   };
 
   const runDemo = async () => {
+    if (!heInitialized) {
+      alert('Encryption system not ready. Please wait...');
+      return;
+    }
+
     setIsProcessing(true);
     setError(null);
     const startTime = Date.now();
@@ -214,24 +224,15 @@ function App() {
       });
 
       updateStage('encryption', 'in-progress');
+      const he = getHEInstance();
 
-      const keyArray = new Uint8Array(32);
-      crypto.getRandomValues(keyArray);
-      const keyBase64 = btoa(String.fromCharCode(...keyArray));
-
-      // Proper UTF-8 base64 encoding
-      const dataStr = JSON.stringify(demoImage);
-      const encoder = new TextEncoder();
-      const dataBytes = encoder.encode(dataStr);
-      const encodedBinary = Array.from(dataBytes, byte => String.fromCharCode(byte)).join('');
-      const encryptedBase64 = btoa(encodedBinary);
-
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Encrypt demo image using HE utilities
+      const encryptedImage = await he.encryptImage(demoImage);
 
       updateStage('encryption', 'completed', {
-        duration: 100,
-        scheme: 'Base64 Encoding (Demo)',
-        keyPreview: keyBase64.substring(0, 24) + '...'
+        duration: Date.now() - startTime,
+        scheme: he.getSchemeInfo()?.scheme || 'CKKS (TenSEAL)',
+        keyPreview: he.getPublicKey()?.substring(0, 24) + '...'
       });
 
       updateStage('transmission', 'in-progress');
@@ -240,10 +241,9 @@ function App() {
 
       updateStage('inference', 'in-progress');
 
-      const inferenceResponse = await axios.post(`${API_URL}/predict_encrypted`, {
-        encrypted_data: encryptedBase64,
-        key: keyBase64,
-        algorithm: 'Base64'
+      // Call the real HE inference endpoint
+      const inferenceResponse = await axios.post(`${API_URL}/encryption/predict_encrypted`, {
+        encrypted_image: encryptedImage
       });
 
       updateStage('inference', 'completed', {
@@ -255,9 +255,9 @@ function App() {
       setProcessData({
         raw: demoImage,
         encrypted: {
-          data: encryptedBase64.substring(0, 100) + '...',
-          fullData: encryptedBase64,
-          keyPreview: keyBase64.substring(0, 24) + '...'
+          data: encryptedImage.substring(0, 100) + '...',
+          fullData: encryptedImage,
+          keyPreview: he.getPublicKey()?.substring(0, 24) + '...'
         },
         inference: {
           encryptedResult: null,
@@ -276,16 +276,9 @@ function App() {
 
       updateStage('decryption', 'in-progress');
 
+      // Decrypt the result using HE utilities
       const encryptedResult = inferenceResponse.data.encrypted_result;
-      // Proper UTF-8 base64 decoding
-      const decodedBinary = atob(encryptedResult);
-      const bytes = new Uint8Array(decodedBinary.length);
-      for (let i = 0; i < decodedBinary.length; i++) {
-        bytes[i] = decodedBinary.charCodeAt(i);
-      }
-      const decoder = new TextDecoder();
-      const decodedStr = decoder.decode(bytes);
-      const decryptedResult = JSON.parse(decodedStr);
+      const decryptedResult = await he.decryptResult(encryptedResult);
 
       await new Promise(resolve => setTimeout(resolve, 50));
       updateStage('decryption', 'completed', { duration: 50 });
@@ -293,14 +286,14 @@ function App() {
       const prediction = decryptedResult.prediction ?? 0;
       const confidence = decryptedResult.confidence ?? 0;
       const probs = decryptedResult.probabilities ?? [];
-      const logits = decryptedResult.logits ?? [];
+      const logits = [];
 
       setProcessData({
         raw: demoImage,
         encrypted: {
-          data: encryptedBase64.substring(0, 100) + '...',
-          fullData: encryptedBase64,
-          keyPreview: keyBase64.substring(0, 24) + '...'
+          data: encryptedImage.substring(0, 100) + '...',
+          fullData: encryptedImage,
+          keyPreview: he.getPublicKey()?.substring(0, 24) + '...'
         },
         inference: {
           encryptedResult: encryptedResult,
