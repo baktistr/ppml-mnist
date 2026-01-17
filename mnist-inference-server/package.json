@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "@stablelib/x25519": "^2.0.1",
+    "sodium-plus": "^0.9.0"
+  }
+}
