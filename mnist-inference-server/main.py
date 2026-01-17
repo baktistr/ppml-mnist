@@ -1,6 +1,6 @@
 """
 MNIST Inference Server using PyTorch
-FastAPI server for MNIST digit classification
+FastAPI server for MNIST digit classification with Homomorphic Encryption support
 """
 
 from fastapi import FastAPI, HTTPException
@@ -14,6 +14,8 @@ from typing import List, Optional
 import uvicorn
 import json
 import base64
+import tenseal
+from encryption import initialize_he_on_startup, get_he_instance, HomomorphicEncryption
 
 
 class MNISTCNN(nn.Module):
@@ -86,7 +88,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model on startup"""
+    """Load model and initialize HE on startup"""
     global model
     model = MNISTCNN().to(device)
 
@@ -98,6 +100,11 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError:
         print("No pre-trained model found. Using initialized weights.")
         print("Train the model using: python train.py")
+
+    # Initialize Homomorphic Encryption
+    print("Initializing Homomorphic Encryption system...")
+    initialize_he_on_startup()
+    print("HE system initialized")
 
     yield
 
@@ -153,6 +160,124 @@ async def get_model_info():
         parameters=param_count,
         is_trained=True  # Will be False if no weights loaded
     )
+
+
+# =============================================================================
+# Homomorphic Encryption Endpoints
+# =============================================================================
+
+class HEKeysResponse(BaseModel):
+    """Response model for HE keys"""
+    public_key: str
+    scheme: str
+    poly_modulus_degree: int
+
+
+@app.get("/encryption/keys", response_model=HEKeysResponse)
+async def get_encryption_keys():
+    """
+    Get public key for homomorphic encryption.
+
+    Returns the server's public key that clients should use to encrypt
+    their MNIST images before sending for inference.
+
+    Returns:
+        HEKeysResponse with public_key and scheme information
+    """
+    he = get_he_instance()
+    public_key = he.get_public_key()
+
+    return HEKeysResponse(
+        public_key=public_key,
+        scheme="CKKS",
+        poly_modulus_degree=he.poly_modulus_degree
+    )
+
+
+class HEInferenceRequest(BaseModel):
+    """Request model for real HE inference"""
+    encrypted_image: str  # Base64-encoded CKKS encrypted image
+
+
+class HEInferenceResponse(BaseModel):
+    """Response model for real HE inference"""
+    encrypted_result: str  # Base64-encoded encrypted prediction result
+
+
+@app.post("/encryption/predict_encrypted", response_model=HEInferenceResponse)
+async def predict_with_he(request: HEInferenceRequest):
+    """
+    Run inference on homomorphically encrypted image data.
+
+    This endpoint demonstrates the HE pipeline where:
+    1. Client encrypts image using CKKS
+    2. Server receives encrypted data
+    3. Server decrypts and runs CNN (simplified approach)
+    4. Server encrypts result and sends back
+
+    Note: True homomorphic CNN inference is complex. This implementation
+    uses a hybrid approach where the server can decrypt but the client
+    receives encrypted results.
+
+    Args:
+        request: HEInferenceRequest with encrypted_image
+
+    Returns:
+        HEInferenceResponse with encrypted prediction result
+    """
+    try:
+        he = get_he_instance()
+
+        # For the hybrid approach: decrypt the image on server side
+        # In full HE, this would run CNN directly on ciphertext
+        encrypted_bytes = base64.b64decode(request.encrypted_image)
+
+        # Decrypt the image (simplified - true HE would operate on ciphertext)
+        encrypted_vector = tenseal.CKKSVector.load(he.context, encrypted_bytes)
+        decrypted_flat = encrypted_vector.decrypt()
+
+        # Convert to numpy and reshape
+        image_flat = np.array(decrypted_flat, dtype=np.float32)
+        image_array = (image_flat * 255.0).reshape(1, 1, 28, 28).to(device)
+
+        # Run CNN inference
+        with torch.no_grad():
+            outputs = model(image_array)
+            probabilities = torch.softmax(outputs, dim=1)
+            confidence, prediction = torch.max(probabilities, 1)
+
+        probs = probabilities.cpu().numpy()[0].tolist()
+        pred_int = int(prediction.item())
+        conf_float = float(confidence.item())
+
+        # Encrypt the result for the client
+        encrypted_result = he.encrypt_prediction_result(pred_int, conf_float, probs)
+
+        return HEInferenceResponse(encrypted_result=encrypted_result)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"HE inference failed: {str(e)}")
+
+
+@app.get("/encryption/info")
+async def get_he_info():
+    """Get information about the homomorphic encryption system"""
+    he = get_he_instance()
+    return {
+        "scheme": "CKKS (Cheon-Kim-Kim-Song)",
+        "library": "TenSEAL (Microsoft SEAL)",
+        "poly_modulus_degree": he.poly_modulus_degree,
+        "global_scale": he.global_scale,
+        "security_level": he.security_level,
+        "supported_operations": [
+            "addition",
+            "multiplication",
+            "rotation",
+            "matrix multiplication"
+        ]
+    }
 
 
 @app.post("/predict", response_model=PredictionResponse)
