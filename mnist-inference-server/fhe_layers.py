@@ -71,8 +71,14 @@ class FHEConv2D:
                 row = i * W_out + j
                 for ki in range(K):
                     for kj in range(K):
-                        col = (i + ki) * W + (j + kj)
-                        im2col[row, col] = 1.0
+                        # Map output position (i,j) with kernel offset (ki,kj) to input position
+                        # Account for padding: subtract P to get the actual input indices
+                        input_i = i + ki - P
+                        input_j = j + kj - P
+                        # Only set if within bounds (handle padding by skipping)
+                        if 0 <= input_i < H and 0 <= input_j < W:
+                            col = input_i * W + input_j
+                            im2col[row, col] = 1.0
 
         return im2col
 
@@ -108,7 +114,8 @@ class FHEConv2D:
 
     def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
         """Pad array to match poly_modulus_degree."""
-        poly_modulus = self.context.params.poly_modulus_degree
+        # Use a fixed poly_modulus_degree of 8192 for CKKS
+        poly_modulus = 8192
         padded = np.zeros(poly_modulus, dtype=np.float64)
         padded[:len(arr)] = arr.astype(np.float64)
         return padded
@@ -310,7 +317,8 @@ class FHELinear:
 
     def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
         """Pad array to match poly_modulus_degree."""
-        poly_modulus = self.context.params.poly_modulus_degree
+        # Use a fixed poly_modulus_degree of 8192 for CKKS
+        poly_modulus = 8192
         padded = np.zeros(poly_modulus, dtype=np.float64)
         padded[:len(arr)] = arr.astype(np.float64)
         return padded
