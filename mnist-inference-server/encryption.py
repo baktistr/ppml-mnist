@@ -238,6 +238,46 @@ class HomomorphicEncryption:
         }
 
 
+    def encrypt_image_for_fhe(self, image_data: np.ndarray) -> str:
+        """
+        Encrypt image data for FHE CNN inference.
+
+        Prepares and encrypts the input so it can be processed by the FHE CNN model.
+
+        Args:
+            image_data: (28, 28) numpy array or flattened (784,) array with values 0-255
+
+        Returns:
+            Base64-encoded encrypted image for FHE operations
+        """
+        logger.info(f"Encrypting image for FHE: shape={image_data.shape}")
+
+        # Flatten if needed
+        if image_data.ndim == 2:
+            image_flat = image_data.flatten().astype(np.float64)
+        else:
+            image_flat = image_data.astype(np.float64)
+
+        # Normalize to [0, 1]
+        normalized = image_flat / 255.0
+
+        # Pad to match poly_modulus_degree
+        poly_modulus_degree = self.poly_modulus_degree
+        padded = np.zeros(poly_modulus_degree, dtype=np.float64)
+        padded[:len(normalized)] = normalized
+
+        # Encrypt using CKKS
+        encrypted_input = tenseal.CKKSVector(self.context, padded)
+
+        # Serialize to base64
+        encrypted_bytes = encrypted_input.serialize()
+        encrypted_b64 = base64.b64encode(encrypted_bytes).decode('utf-8')
+
+        logger.info(f"Encrypted image for FHE: {len(padded)} elements → {len(encrypted_b64)} chars")
+
+        return encrypted_b64
+
+
 # Global HE instance for server
 _he_instance: Optional[HomomorphicEncryption] = None
 

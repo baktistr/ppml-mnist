@@ -16,6 +16,7 @@ import json
 import base64
 import tenseal
 from encryption import initialize_he_on_startup, get_he_instance, HomomorphicEncryption
+from fhe_cnn import FHEMNISTCNN, create_fhe_model
 
 
 class MNISTCNN(nn.Module):
@@ -89,7 +90,9 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load model and initialize HE on startup"""
-    global model
+    global model, fhe_model
+
+    # Load regular CNN model
     model = MNISTCNN().to(device)
 
     # Try to load pre-trained weights
@@ -103,8 +106,18 @@ async def lifespan(app: FastAPI):
 
     # Initialize Homomorphic Encryption
     print("Initializing Homomorphic Encryption system...")
-    initialize_he_on_startup()
+    he = initialize_he_on_startup()
     print("HE system initialized")
+
+    # Initialize FHE CNN model (true FHE inference)
+    print("Initializing FHE CNN model...")
+    context = he.context
+    try:
+        fhe_model = create_fhe_model(context, 'mnist_cnn.pth')
+        print("FHE CNN model initialized with encrypted weights")
+    except Exception as e:
+        print(f"Warning: Could not initialize FHE model: {e}")
+        fhe_model = None
 
     yield
 
@@ -247,8 +260,8 @@ async def predict_with_he(request: HEInferenceRequest):
                 normalized = json.loads(decoded_str)
                 image_flat = np.array(normalized, dtype=np.float32)
 
-            # Convert to numpy and reshape (data is already normalized 0-1)
-            image_array = image_flat.reshape(1, 1, 28, 28).to(device)
+            # Convert to torch tensor and reshape (data is already normalized 0-1)
+            image_array = torch.from_numpy(image_flat).reshape(1, 1, 28, 28).to(device)
 
             # Run CNN inference
             with torch.no_grad():
@@ -294,11 +307,73 @@ async def predict_with_he(request: HEInferenceRequest):
         raise HTTPException(status_code=500, detail=f"HE inference failed: {str(e)}")
 
 
+@app.post("/encryption/predict_encrypted_fhe", response_model=HEInferenceResponse)
+async def predict_with_true_fhe(request: HEInferenceRequest):
+    """
+    TRUE FHE Inference - All operations on encrypted data.
+
+    This endpoint performs the complete CNN forward pass on homomorphically encrypted data,
+    only decrypting the final prediction result.
+
+    Pipeline:
+    1. Client sends CKKS-encrypted image
+    2. Server performs ALL CNN operations on encrypted data
+    3. Server returns encrypted result
+    4. Client decrypts final result
+
+    Key characteristics:
+    - No intermediate decryption
+    - Uses polynomial approximations for non-linear operations
+    - Uses average pooling instead of max pooling
+    - Uses square activation instead of ReLU
+    - Only final logits are decrypted (not intermediate feature maps)
+
+    Args:
+        request: HEInferenceRequest with encrypted_image
+
+    Returns:
+        HEInferenceResponse with encrypted prediction result
+    """
+    if fhe_model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="FHE model not initialized. Ensure model weights are loaded and encrypted."
+        )
+
+    try:
+        # Decode encrypted image
+        encrypted_bytes = base64.b64decode(request.encrypted_image)
+        encrypted_image = tenseal.CKKSVector.load(get_he_instance().context, encrypted_bytes)
+
+        # Get secret key for final decryption
+        secret_key = get_he_instance()._secret_key
+
+        # Run FHE inference (all operations on encrypted data!)
+        print("Starting TRUE FHE CNN inference...")
+        encrypted_logits = fhe_model.forward(encrypted_image, secret_key)
+        print("TRUE FHE CNN inference complete!")
+
+        # Encrypt the result for sending back
+        encrypted_result_bytes = encrypted_logits.serialize()
+        encrypted_result_b64 = base64.b64encode(encrypted_result_bytes).decode('utf-8')
+
+        return HEInferenceResponse(
+            encrypted_result=encrypted_result_b64,
+            framework="tenseal-true-fhe"
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"FHE inference failed: {str(e)}")
+
+
 @app.get("/encryption/info")
 async def get_he_info():
     """Get information about the homomorphic encryption system"""
     he = get_he_instance()
-    return {
+
+    info = {
         "scheme": "CKKS (Cheon-Kim-Kim-Song)",
         "library": "TenSEAL (Microsoft SEAL)",
         "poly_modulus_degree": he.poly_modulus_degree,
@@ -318,13 +393,23 @@ async def get_he_info():
                 "status": "available"
             },
             {
+                "name": "tenseal-true-fhe",
+                "display_name": "TenSEAL True FHE (All operations on encrypted data)",
+                "scheme": "CKKS",
+                "status": "available",
+                "note": "Uses polynomial approximations, only decrypts final result"
+            },
+            {
                 "name": "concrete",
                 "display_name": "Concrete ML (Zama TFHE)",
                 "scheme": "TFHE",
                 "status": "not implemented"
             }
-        ]
+        ],
+        "fhe_model_initialized": fhe_model is not None
     }
+
+    return info
 
 
 @app.post("/predict", response_model=PredictionResponse)
