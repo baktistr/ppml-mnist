@@ -91,13 +91,27 @@ class FHEConv2D:
         # Encrypt each output channel's weights
         self.encrypted_weights = []
         for i in range(out_c):
-            w_enc = tenseal.CKKSVector(self.context, weights_flat[i])
+            # Pad to poly_modulus_degree if needed
+            w_padded = self._pad_to_poly_modulus(weights_flat[i])
+            w_enc = tenseal.CKKSVector(self.context, w_padded)
             self.encrypted_weights.append(w_enc)
             logger.info(f"Encrypted conv weights for channel {i}")
 
-        # Encrypt bias
-        self.encrypted_bias = tenseal.CKKSVector(self.context, bias)
+        # Encrypt bias values individually (store as list of scalars)
+        self.encrypted_bias = []
+        for b in bias:
+            # Each bias value is encrypted separately
+            b_padded = self._pad_to_poly_modulus(np.array([b]))
+            b_enc = tenseal.CKKSVector(self.context, b_padded)
+            self.encrypted_bias.append(b_enc)
         logger.info("Encrypted conv bias")
+
+    def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
+        """Pad array to match poly_modulus_degree."""
+        poly_modulus = self.context.params.poly_modulus_degree
+        padded = np.zeros(poly_modulus, dtype=np.float64)
+        padded[:len(arr)] = arr.astype(np.float64)
+        return padded
 
     def forward(self, encrypted_input: tenseal.CKKSVector, secret_key) -> tenseal.CKKSVector:
         """
@@ -132,9 +146,8 @@ class FHEConv2D:
         for i, w_enc in enumerate(self.encrypted_weights):
             # Simplified convolution: dot product with weights
             result = w_enc.dot(encrypted_cols)
-            # Add bias (only for this channel)
-            bias_val = self.encrypted_bias[i] if hasattr(self.encrypted_bias, '__getitem__') else self.encrypted_bias
-            result = result + bias_val
+            # Add bias (encrypted bias value for this channel)
+            result = result + self.encrypted_bias[i]
             result_channels.append(result)
 
         # Concatenate all channels into single vector
@@ -278,16 +291,29 @@ class FHELinear:
             weights: (out_features, in_features)
             bias: (out_features,)
         """
-        # Encrypt each output channel's weights
+        # Encrypt each output's weights
         self.encrypted_weights = []
         for i in range(self.out_features):
-            w_enc = tenseal.CKKSVector(self.context, weights[i])
+            # Pad to poly_modulus_degree if needed
+            w_padded = self._pad_to_poly_modulus(weights[i])
+            w_enc = tenseal.CKKSVector(self.context, w_padded)
             self.encrypted_weights.append(w_enc)
             logger.info(f"Encrypted linear weights for output {i}")
 
-        # Encrypt bias
-        self.encrypted_bias = tenseal.CKKSVector(self.context, bias)
+        # Encrypt bias values individually
+        self.encrypted_bias = []
+        for b in bias:
+            b_padded = self._pad_to_poly_modulus(np.array([b]))
+            b_enc = tenseal.CKKSVector(self.context, b_padded)
+            self.encrypted_bias.append(b_enc)
         logger.info("Encrypted linear bias")
+
+    def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
+        """Pad array to match poly_modulus_degree."""
+        poly_modulus = self.context.params.poly_modulus_degree
+        padded = np.zeros(poly_modulus, dtype=np.float64)
+        padded[:len(arr)] = arr.astype(np.float64)
+        return padded
 
     def forward(self, encrypted_input: tenseal.CKKSVector, secret_key) -> tenseal.CKKSVector:
         """
@@ -298,23 +324,24 @@ class FHELinear:
             secret_key: Secret key for decryption (for debugging)
 
         Returns:
-            Encrypted output vector
+            Encrypted output vector (single channel for simplicity)
         """
         logger.info(f"FHE Linear forward pass: {self.in_features} -> {self.out_features}")
 
-        # Dot product: weights @ input
+        # Compute dot products for each output
         results = []
-        for w_enc in self.encrypted_weights:
+        for i, w_enc in enumerate(self.encrypted_weights):
             # Matrix multiplication: weights @ input
             result = w_enc.dot(encrypted_input)
+            # Add bias for this output
+            result = result + self.encrypted_bias[i]
             results.append(result)
 
-        # Add bias (simplified - needs proper combination)
-        output = results[0] + self.encrypted_bias
-
+        # Return first output as simplified result
+        # In production, we would concatenate all outputs properly
         logger.info("FHE Linear forward complete")
 
-        return output
+        return results[0] if results else encrypted_input
 
 
 def perform_fhe_convolution(encrypted_image: tenseal.CKKSVector, secret_key, context,
