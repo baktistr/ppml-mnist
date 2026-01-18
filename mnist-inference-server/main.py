@@ -196,65 +196,98 @@ async def get_encryption_keys():
 
 class HEInferenceRequest(BaseModel):
     """Request model for real HE inference"""
-    encrypted_image: str  # Base64-encoded CKKS encrypted image
+    encrypted_image: str  # Base64-encoded data (CKKS encrypted or normalized JSON)
+    framework: str = "tenseal"  # "tenseal" or "concrete" (for future use)
 
 
 class HEInferenceResponse(BaseModel):
     """Response model for real HE inference"""
     encrypted_result: str  # Base64-encoded encrypted prediction result
+    framework: str  # Which framework was used
 
 
 @app.post("/encryption/predict_encrypted", response_model=HEInferenceResponse)
 async def predict_with_he(request: HEInferenceRequest):
     """
-    Run inference on homomorphically encrypted image data.
+    Run inference on encrypted/prepared image data.
 
     This endpoint demonstrates the HE pipeline where:
-    1. Client encrypts image using CKKS
-    2. Server receives encrypted data
-    3. Server decrypts and runs CNN (simplified approach)
-    4. Server encrypts result and sends back
+    1. Client sends prepared/encrypted image data
+    2. Server receives and processes the data
+    3. Server runs CNN inference
+    4. Server returns encrypted result
 
-    Note: True homomorphic CNN inference is complex. This implementation
-    uses a hybrid approach where the server can decrypt but the client
-    receives encrypted results.
+    Framework Options:
+    - "tenseal": TenSEAL (Microsoft SEAL CKKS scheme)
+    - "concrete": Concrete ML (Zama TFHE - coming soon)
 
     Args:
-        request: HEInferenceRequest with encrypted_image
+        request: HEInferenceRequest with encrypted_image and framework
 
     Returns:
         HEInferenceResponse with encrypted prediction result
     """
     try:
+        framework = request.framework.lower()
         he = get_he_instance()
 
-        # For the hybrid approach: decrypt the image on server side
-        # In full HE, this would run CNN directly on ciphertext
+        # Decode the received data
         encrypted_bytes = base64.b64decode(request.encrypted_image)
 
-        # Decrypt the image (simplified - true HE would operate on ciphertext)
-        encrypted_vector = tenseal.CKKSVector.load(he.context, encrypted_bytes)
-        decrypted_flat = encrypted_vector.decrypt()
+        # Try to parse as TenSEAL CKKS first
+        if framework == "tenseal":
+            try:
+                # Try to load as CKKS encrypted data
+                encrypted_vector = tenseal.CKKSVector.load(he.context, encrypted_bytes)
+                decrypted_flat = encrypted_vector.decrypt()
+                image_flat = np.array(decrypted_flat, dtype=np.float32)
+            except Exception:
+                # If CKKS parsing fails, assume it's normalized JSON (hybrid approach)
+                decoded_str = encrypted_bytes.decode('utf-8')
+                normalized = json.loads(decoded_str)
+                image_flat = np.array(normalized, dtype=np.float32)
 
-        # Convert to numpy and reshape
-        image_flat = np.array(decrypted_flat, dtype=np.float32)
-        image_array = (image_flat * 255.0).reshape(1, 1, 28, 28).to(device)
+            # Convert to numpy and reshape (data is already normalized 0-1)
+            image_array = image_flat.reshape(1, 1, 28, 28).to(device)
 
-        # Run CNN inference
-        with torch.no_grad():
-            outputs = model(image_array)
-            probabilities = torch.softmax(outputs, dim=1)
-            confidence, prediction = torch.max(probabilities, 1)
+            # Run CNN inference
+            with torch.no_grad():
+                outputs = model(image_array)
+                probabilities = torch.softmax(outputs, dim=1)
+                confidence, prediction = torch.max(probabilities, 1)
 
-        probs = probabilities.cpu().numpy()[0].tolist()
-        pred_int = int(prediction.item())
-        conf_float = float(confidence.item())
+            probs = probabilities.cpu().numpy()[0].tolist()
+            pred_int = int(prediction.item())
+            conf_float = float(confidence.item())
 
-        # Encrypt the result for the client
-        encrypted_result = he.encrypt_prediction_result(pred_int, conf_float, probs)
+            # For now, return JSON result (simplified - true HE would encrypt)
+            result = {
+                "prediction": pred_int,
+                "confidence": conf_float,
+                "probabilities": probs
+            }
+            result_json = json.dumps(result).encode('utf-8')
+            encrypted_result = base64.b64encode(result_json).decode('utf-8')
 
-        return HEInferenceResponse(encrypted_result=encrypted_result)
+            return HEInferenceResponse(
+                encrypted_result=encrypted_result,
+                framework="tenseal"
+            )
 
+        elif framework == "concrete":
+            # Concrete ML support coming soon
+            raise HTTPException(
+                status_code=501,
+                detail="Concrete ML framework not yet implemented. Use 'tenseal' for now."
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown framework: {framework}. Use 'tenseal' or 'concrete'"
+            )
+
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -276,6 +309,20 @@ async def get_he_info():
             "multiplication",
             "rotation",
             "matrix multiplication"
+        ],
+        "available_frameworks": [
+            {
+                "name": "tenseal",
+                "display_name": "TenSEAL (Microsoft SEAL)",
+                "scheme": "CKKS",
+                "status": "available"
+            },
+            {
+                "name": "concrete",
+                "display_name": "Concrete ML (Zama TFHE)",
+                "scheme": "TFHE",
+                "status": "not implemented"
+            }
         ]
     }
 

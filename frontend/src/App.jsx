@@ -27,6 +27,8 @@ function App() {
     output: null
   });
   const [heInitialized, setHeInitialized] = useState(false);
+  const [selectedFramework, setSelectedFramework] = useState('tenseal'); // 'tenseal' or 'concrete'
+  const [availableFrameworks, setAvailableFrameworks] = useState([]);
 
   // Initialize HE system on mount
   useEffect(() => {
@@ -36,6 +38,10 @@ function App() {
         await he.initialize();
         setHeInitialized(true);
         console.log('HE system initialized successfully');
+
+        // Fetch available frameworks
+        const infoResponse = await axios.get(`${API_URL}/encryption/info`);
+        setAvailableFrameworks(infoResponse.data.available_frameworks || []);
       } catch (err) {
         console.error('Failed to initialize HE:', err);
         setError('Failed to initialize encryption system');
@@ -110,7 +116,8 @@ function App() {
 
       // Call the real HE inference endpoint
       const inferenceResponse = await axios.post(`${API_URL}/encryption/predict_encrypted`, {
-        encrypted_image: encryptedImage
+        encrypted_image: encryptedImage,
+        framework: selectedFramework
       });
 
       const transmissionTime = Date.now() - transmissionStart;
@@ -243,7 +250,8 @@ function App() {
 
       // Call the real HE inference endpoint
       const inferenceResponse = await axios.post(`${API_URL}/encryption/predict_encrypted`, {
-        encrypted_image: encryptedImage
+        encrypted_image: encryptedImage,
+        framework: selectedFramework
       });
 
       updateStage('inference', 'completed', {
@@ -340,13 +348,39 @@ function App() {
                 <p className="text-xs text-slate-500">Homomorphic Encryption for Secure ML Inference</p>
               </div>
             </div>
-            <button
-              onClick={runDemo}
-              disabled={isProcessing}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isProcessing ? 'Running...' : 'Run Demo'}
-            </button>
+
+            {/* Framework Selector */}
+            <div className="flex items-center gap-3">
+              {availableFrameworks.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-slate-600">Framework:</label>
+                  <select
+                    value={selectedFramework}
+                    onChange={(e) => setSelectedFramework(e.target.value)}
+                    disabled={isProcessing}
+                    className="px-3 py-1.5 text-sm border border-slate-300 rounded-lg bg-white text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {availableFrameworks.map((fw) => (
+                      <option
+                        key={fw.name}
+                        value={fw.name}
+                        disabled={fw.status !== 'available'}
+                      >
+                        {fw.display_name} {fw.status !== 'available' ? `(Coming Soon)` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <button
+                onClick={runDemo}
+                disabled={isProcessing}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-sm font-medium rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isProcessing ? 'Running...' : 'Run Demo'}
+              </button>
+            </div>
           </div>
         </div>
       </header>
