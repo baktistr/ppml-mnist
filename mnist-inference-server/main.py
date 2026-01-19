@@ -368,6 +368,61 @@ async def predict_with_true_fhe(request: HEInferenceRequest):
         raise HTTPException(status_code=500, detail=f"FHE inference failed: {str(e)}")
 
 
+class ImageDataRequest(BaseModel):
+    """Request model for image encryption"""
+    image_data: List[float]  # Flattened 784 pixel values
+
+
+class EncryptedImageData(BaseModel):
+    """Response model for encrypted image data"""
+    encrypted_image: str  # Base64-encoded CKKS encrypted image
+    scheme: str
+
+
+@app.post("/encryption/encrypt_for_fhe", response_model=EncryptedImageData)
+async def encrypt_image_for_fhe_endpoint(request: ImageDataRequest):
+    """
+    Encrypt image data using CKKS for true FHE inference.
+
+    This endpoint takes raw image data (784 pixel values), normalizes it,
+    pads it to poly_modulus_degree, and encrypts it using CKKS.
+
+    The resulting encrypted data can be sent to /encryption/predict_encrypted_fhe
+    for true FHE inference where all operations are performed on encrypted data.
+
+    Args:
+        request: ImageDataRequest with 784 pixel values (0-255)
+
+    Returns:
+        EncryptedImageData with base64-encoded CKKS encrypted image
+    """
+    try:
+        if len(request.image_data) != 784:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected 784 pixel values, got {len(request.image_data)}"
+            )
+
+        # Convert to numpy array and encrypt
+        image_array = np.array(request.image_data, dtype=np.float64)
+
+        # Use the HE instance's encrypt_image_for_fhe method
+        he = get_he_instance()
+        encrypted_b64 = he.encrypt_image_for_fhe(image_array)
+
+        return EncryptedImageData(
+            encrypted_image=encrypted_b64,
+            scheme="CKKS"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Image encryption failed: {str(e)}")
+
+
 @app.get("/encryption/info")
 async def get_he_info():
     """Get information about the homomorphic encryption system"""
