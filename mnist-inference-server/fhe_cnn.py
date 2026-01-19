@@ -219,6 +219,9 @@ class FHEMNISTCNN:
         x = self.conv2.forward(x, secret_key)
         logger.info(f"Layer 2 output shape: {x.size()} encrypted values")
 
+        # Rescale BEFORE square activation (Conv2 was 1 multiplication, need to reset before Square)
+        x = self._rescale_ciphertext(x, secret_key)
+
         # Activation
         logger.info("Layer 2: Square Activation")
         x = self.activation.forward(x)
@@ -236,6 +239,9 @@ class FHEMNISTCNN:
         logger.info("Layer 3: Flatten and FC1 (3136 -> 128)")
         x = self.fc1.forward(x, secret_key)
         logger.info(f"Layer 3 output: {x.size()} values")
+
+        # Rescale BEFORE square activation (FC1 was 1 multiplication)
+        x = self._rescale_ciphertext(x, secret_key)
 
         # Activation
         logger.info("Layer 3: Square Activation")
