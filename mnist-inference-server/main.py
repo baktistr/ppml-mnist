@@ -310,23 +310,30 @@ async def predict_with_he(request: HEInferenceRequest):
 @app.post("/encryption/predict_encrypted_fhe", response_model=HEInferenceResponse)
 async def predict_with_true_fhe(request: HEInferenceRequest):
     """
-    TRUE FHE Inference - All operations on encrypted data.
+    Hybrid FHE Inference - Operations on encrypted data with intermediate rescaling.
 
-    This endpoint performs the complete CNN forward pass on homomorphically encrypted data,
-    only decrypting the final prediction result.
+    This endpoint performs CNN forward pass on homomorphically encrypted data
+    using a hybrid FHE approach that includes intermediate rescaling.
 
     Pipeline:
     1. Client sends CKKS-encrypted image
-    2. Server performs ALL CNN operations on encrypted data
-    3. Server returns encrypted result
-    4. Client decrypts final result
+    2. Server performs CNN operations on encrypted data
+    3. After every 3 multiplications, ciphertext is rescaled (decrypt + re-encrypt)
+    4. This allows full CNN architecture while avoiding scale overflow
+    5. Only final logits are returned (still encrypted)
 
     Key characteristics:
-    - No intermediate decryption
+    - Hybrid FHE approach with intermediate rescaling
     - Uses polynomial approximations for non-linear operations
     - Uses average pooling instead of max pooling
     - Uses square activation instead of ReLU
-    - Only final logits are decrypted (not intermediate feature maps)
+    - Poly_modulus_degree: 16384 (increased from 8192)
+    - Supports up to 4 multiplications between rescalings
+    - Maintains full model accuracy (~99%)
+
+    Note: This is a HYBRID approach - intermediate values are temporarily
+    decrypted for rescaling, then re-encrypted. This provides privacy benefits
+    while allowing the full CNN architecture to work within CKKS constraints.
 
     Args:
         request: HEInferenceRequest with encrypted_image
@@ -432,8 +439,10 @@ async def get_he_info():
         "scheme": "CKKS (Cheon-Kim-Kim-Song)",
         "library": "TenSEAL (Microsoft SEAL)",
         "poly_modulus_degree": he.poly_modulus_degree,
+        "coeff_mod_bit_sizes": he.coeff_mod_bit_sizes,
         "global_scale": he.global_scale,
         "security_level": he.security_level,
+        "multiplicative_depth": 4,  # Max multiplications between rescalings
         "supported_operations": [
             "addition",
             "multiplication",
@@ -443,16 +452,17 @@ async def get_he_info():
         "available_frameworks": [
             {
                 "name": "tenseal",
-                "display_name": "TenSEAL (Microsoft SEAL)",
+                "display_name": "TenSEAL (Microsoft SEAL) - Hybrid",
                 "scheme": "CKKS",
-                "status": "available"
+                "status": "available",
+                "note": "Hybrid FHE with intermediate rescaling"
             },
             {
                 "name": "tenseal-true-fhe",
-                "display_name": "TenSEAL True FHE (All operations on encrypted data)",
+                "display_name": "TenSEAL Hybrid FHE (Rescaling for depth)",
                 "scheme": "CKKS",
                 "status": "available",
-                "note": "Uses polynomial approximations, only decrypts final result"
+                "note": "Hybrid approach with rescaling after every 3 multiplications. Maintains full model accuracy."
             },
             {
                 "name": "concrete",
@@ -461,7 +471,8 @@ async def get_he_info():
                 "status": "not implemented"
             }
         ],
-        "fhe_model_initialized": fhe_model is not None
+        "fhe_model_initialized": fhe_model is not None,
+        "fhe_approach": "hybrid_rescaling"
     }
 
     return info

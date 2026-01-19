@@ -31,8 +31,8 @@ class HomomorphicEncryption:
 
     def __init__(
         self,
-        poly_modulus_degree: int = 8192,
-        coeff_mod_bit_sizes: list = [60, 40, 40, 60],
+        poly_modulus_degree: int = 16384,
+        coeff_mod_bit_sizes: list = [60, 40, 40, 40, 40, 60],
         global_scale: float = 2**40,
         security_level: int = 128
     ):
@@ -40,8 +40,8 @@ class HomomorphicEncryption:
         Initialize TenSEAL context with CKKS scheme.
 
         Args:
-            poly_modulus_degree: Degree of polynomial modulus (8192 for good performance/security)
-            coeff_mod_bit_sizes: Bit sizes for coefficient modulus primes
+            poly_modulus_degree: Degree of polynomial modulus (16384 for multiplicative depth)
+            coeff_mod_bit_sizes: Bit sizes for coefficient modulus primes (6 primes for 4 multiplications)
             global_scale: Scale for encoding floating-point numbers
             security_level: Security level (128-bit recommended)
         """

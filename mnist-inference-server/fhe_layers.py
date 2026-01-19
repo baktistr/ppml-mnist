@@ -114,8 +114,8 @@ class FHEConv2D:
 
     def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
         """Pad array to match poly_modulus_degree."""
-        # Use a fixed poly_modulus_degree of 8192 for CKKS
-        poly_modulus = 8192
+        # Use a fixed poly_modulus_degree of 16384 for CKKS
+        poly_modulus = 16384
         padded = np.zeros(poly_modulus, dtype=np.float64)
         padded[:len(arr)] = arr.astype(np.float64)
         return padded
@@ -317,8 +317,8 @@ class FHELinear:
 
     def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
         """Pad array to match poly_modulus_degree."""
-        # Use a fixed poly_modulus_degree of 8192 for CKKS
-        poly_modulus = 8192
+        # Use a fixed poly_modulus_degree of 16384 for CKKS
+        poly_modulus = 16384
         padded = np.zeros(poly_modulus, dtype=np.float64)
         padded[:len(arr)] = arr.astype(np.float64)
         return padded
