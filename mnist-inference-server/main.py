@@ -17,6 +17,7 @@ import base64
 import tenseal
 from encryption import initialize_he_on_startup, get_he_instance, HomomorphicEncryption
 from fhe_cnn import FHEMNISTCNN, create_fhe_model
+from concrete_model import get_concrete_server, is_concrete_ml_available
 
 
 class MNISTCNN(nn.Module):
@@ -435,6 +436,9 @@ async def get_he_info():
     """Get information about the homomorphic encryption system"""
     he = get_he_instance()
 
+    # Check Concrete ML availability
+    concrete_available = is_concrete_ml_available()
+
     info = {
         "scheme": "CKKS (Cheon-Kim-Kim-Song)",
         "library": "TenSEAL (Microsoft SEAL)",
@@ -465,17 +469,157 @@ async def get_he_info():
                 "note": "Hybrid approach with rescaling after every 3 multiplications. Maintains full model accuracy."
             },
             {
-                "name": "concrete",
-                "display_name": "Concrete ML (Zama TFHE)",
+                "name": "concrete-ml",
+                "display_name": "Concrete ML (Zama TFHE) - True FHE",
                 "scheme": "TFHE",
-                "status": "not implemented"
+                "status": "available" if concrete_available else "not configured",
+                "note": "True FHE with no intermediate decryption. Client-side key generation."
             }
         ],
         "fhe_model_initialized": fhe_model is not None,
-        "fhe_approach": "hybrid_rescaling"
+        "fhe_approach": "hybrid_rescaling",
+        "concrete_ml_available": concrete_available
     }
 
     return info
+
+
+# =============================================================================
+# Concrete ML True FHE Endpoints
+# =============================================================================
+
+
+class TrueFHEInferenceRequest(BaseModel):
+    """Request model for True FHE inference using Concrete ML"""
+    encrypted_image: str  # Hex-encoded encrypted image (client-side encryption)
+    framework: str = "concrete-ml"  # Must be "concrete-ml" for this endpoint
+
+
+class TrueFHEInferenceResponse(BaseModel):
+    """Response model for True FHE inference"""
+    encrypted_result: str  # Hex-encoded encrypted prediction result
+    framework: str
+    true_fhe: bool  # Always True for this endpoint
+
+
+@app.post("/encryption/predict_true_fhe", response_model=TrueFHEInferenceResponse)
+async def predict_with_true_fhe(request: TrueFHEInferenceRequest):
+    """
+    True FHE Inference - No intermediate decryption using Concrete ML.
+
+    This endpoint provides TRUE fully homomorphic encryption where:
+    1. Client sends Concrete-encrypted image (encrypted with client's private key)
+    2. Server runs FHE inference WITHOUT any decryption
+    3. Server returns encrypted result (only client can decrypt)
+
+    Privacy guarantees:
+    - Server never sees intermediate activations in plaintext
+    - Server never has access to client's private key
+    - Only the client can decrypt the final prediction
+    - True end-to-end encrypted inference
+
+    Framework: Concrete ML by Zama (TFHE scheme)
+
+    Args:
+        request: TrueFHEInferenceRequest with encrypted_image (hex-encoded)
+
+    Returns:
+        TrueFHEInferenceResponse with encrypted_result (hex-encoded)
+
+    Raises:
+        HTTPException 503: If Concrete ML is not configured
+        HTTPException 500: If FHE inference fails
+    """
+    if not is_concrete_ml_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Concrete ML not configured. Please run: python train_qat.py"
+        )
+
+    try:
+        # Get Concrete ML server
+        server = get_concrete_server()
+
+        # Decode hex encrypted input
+        encrypted_input = bytes.fromhex(request.encrypted_image)
+
+        logger.info(
+            f"Received True FHE inference request: "
+            f"{len(encrypted_input)} bytes of encrypted data"
+        )
+
+        # Run FHE inference WITHOUT decryption
+        encrypted_result = server.predict(encrypted_input)
+
+        logger.info(
+            f"True FHE inference complete: "
+            f"{len(encrypted_result)} bytes of encrypted result"
+        )
+
+        # Return encrypted result as hex
+        return TrueFHEInferenceResponse(
+            encrypted_result=encrypted_result.hex(),
+            framework="concrete-ml-true-fhe",
+            true_fhe=True
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid encrypted input: {str(e)}")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"True FHE inference failed: {str(e)}")
+
+
+@app.get("/encryption/fhe_model_spec")
+async def get_fhe_model_spec():
+    """
+    Return FHE model specification needed for client-side encryption.
+
+    This endpoint provides the model specification that clients need to:
+    1. Initialize the Concrete ML client
+    2. Generate keys locally
+    3. Encrypt images on the client side
+
+    Returns:
+        Model specification JSON for client-side Concrete ML initialization
+    """
+    if not is_concrete_ml_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Concrete ML not configured. Please run: python train_qat.py"
+        )
+
+    try:
+        from pathlib import Path
+
+        model_dir = Path("compiled_fhe_model")
+
+        # Read model specification files
+        specs = {}
+        for file in ["model_specs.json", "processed_graph.json"]:
+            filepath = model_dir / file
+            if filepath.exists():
+                with open(filepath, 'r') as f:
+                    specs[file] = json.load(f)
+
+        # Get server info
+        server = get_concrete_server()
+        model_info = server.get_model_info()
+
+        return {
+            "model_specs": specs,
+            "model_info": model_info,
+            "framework": "concrete-ml",
+            "encryption_parameters": {
+                "scheme": "TFHE",
+                "client_key_generation": True,
+                "server_never_decrypts": True
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load model specs: {str(e)}")
 
 
 @app.post("/predict", response_model=PredictionResponse)

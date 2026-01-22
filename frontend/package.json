@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@zama-ai/concrete-ml": "^1.0.0",
     "axios": "^1.6.2",
     "framer-motion": "^10.16.16",
     "node-seal": "^7.0.0",

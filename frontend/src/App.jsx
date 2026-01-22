@@ -4,6 +4,7 @@ import BeadTracker from './components/BeadTracker/BeadTracker';
 import ProcessVisualization from './components/ProcessVisualization';
 import axios from 'axios';
 import { getHEInstance } from './utils/encryption';
+import { getConcreteMLEncryption } from './utils/concreteEncryption';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8001';
 
@@ -27,17 +28,30 @@ function App() {
     output: null
   });
   const [heInitialized, setHeInitialized] = useState(false);
-  const [selectedFramework, setSelectedFramework] = useState('tenseal'); // 'tenseal' or 'concrete'
+  const [concreteMLInitialized, setConcreteMLInitialized] = useState(false);
+  const [selectedFramework, setSelectedFramework] = useState('tenseal'); // 'tenseal' or 'concrete-ml'
   const [availableFrameworks, setAvailableFrameworks] = useState([]);
 
   // Initialize HE system on mount
   useEffect(() => {
     const initHE = async () => {
       try {
+        // Initialize TenSEAL (hybrid FHE)
         const he = getHEInstance();
         await he.initialize();
         setHeInitialized(true);
-        console.log('HE system initialized successfully');
+        console.log('TenSEAL HE system initialized successfully');
+
+        // Initialize Concrete ML (true FHE)
+        try {
+          const concreteHE = getConcreteMLEncryption();
+          await concreteHE.initialize();
+          setConcreteMLInitialized(true);
+          console.log('Concrete ML initialized successfully');
+        } catch (concreteErr) {
+          // Concrete ML may not be available if not trained yet
+          console.warn('Concrete ML initialization failed (may not be trained yet):', concreteErr.message);
+        }
 
         // Fetch available frameworks
         const infoResponse = await axios.get(`${API_URL}/encryption/info`);
@@ -89,7 +103,13 @@ function App() {
       return;
     }
 
-    if (!heInitialized) {
+    // Check if the appropriate encryption system is ready
+    const isConcreteML = selectedFramework === 'concrete-ml';
+    if (isConcreteML && !concreteMLInitialized) {
+      alert('Concrete ML not ready. Please train the model first: python train_qat.py');
+      return;
+    }
+    if (!isConcreteML && !heInitialized) {
       alert('Encryption system not ready. Please wait...');
       return;
     }
@@ -100,30 +120,59 @@ function App() {
 
     try {
       updateStage('encryption', 'in-progress');
-      const he = getHEInstance();
 
-      // Encrypt image using HE utilities
-      const encryptedImage = await he.encryptImage(imageData);
+      let encryptedImage;
+      let encryptionInfo;
+
+      // Use appropriate encryption based on framework
+      if (isConcreteML) {
+        // True FHE with Concrete ML
+        const concreteHE = getConcreteMLEncryption();
+        encryptedImage = await concreteHE.encryptImage(imageData);
+        encryptionInfo = {
+          scheme: 'TFHE (Concrete ML)',
+          trueFHE: true,
+          keyGeneration: 'client-side'
+        };
+      } else {
+        // Hybrid FHE with TenSEAL
+        const he = getHEInstance();
+        encryptedImage = await he.encryptImage(imageData);
+        encryptionInfo = {
+          scheme: he.getSchemeInfo()?.scheme || 'CKKS (TenSEAL)',
+          trueFHE: false,
+          keyGeneration: 'server-side'
+        };
+      }
 
       updateStage('encryption', 'completed', {
         duration: Date.now() - startTime,
-        scheme: he.getSchemeInfo()?.scheme || 'CKKS (TenSEAL)',
-        keyPreview: he.getPublicKey()?.substring(0, 24) + '...'
+        ...encryptionInfo
       });
 
       updateStage('transmission', 'in-progress');
       const transmissionStart = Date.now();
 
-      // Call the real HE inference endpoint
-      const inferenceResponse = await axios.post(`${API_URL}/encryption/predict_encrypted`, {
-        encrypted_image: encryptedImage,
-        framework: selectedFramework
-      });
+      // Call appropriate endpoint
+      let inferenceResponse;
+      if (isConcreteML) {
+        // True FHE endpoint
+        inferenceResponse = await axios.post(`${API_URL}/encryption/predict_true_fhe`, {
+          encrypted_image: encryptedImage,
+          framework: 'concrete-ml'
+        });
+      } else {
+        // Hybrid FHE endpoint
+        inferenceResponse = await axios.post(`${API_URL}/encryption/predict_encrypted`, {
+          encrypted_image: encryptedImage,
+          framework: selectedFramework
+        });
+      }
 
       const transmissionTime = Date.now() - transmissionStart;
       updateStage('transmission', 'completed', {
         duration: transmissionTime,
-        dataSize: '~5KB'
+        dataSize: isConcreteML ? '~50KB' : '~5KB'
       });
 
       setProcessData(prev => ({
@@ -131,32 +180,44 @@ function App() {
         encrypted: {
           data: encryptedImage.substring(0, 100) + '...',
           fullData: encryptedImage,
-          keyPreview: he.getPublicKey()?.substring(0, 24) + '...'
+          framework: selectedFramework
         }
       }));
 
       updateStage('inference', 'completed', {
         duration: Date.now() - startTime,
-        modelType: 'MNIST CNN (PyTorch)',
-        framework: 'PyTorch'
+        modelType: isConcreteML ? 'MNIST CNN (Concrete ML QAT)' : 'MNIST CNN (PyTorch)',
+        framework: isConcreteML ? 'Concrete ML' : 'PyTorch',
+        trueFHE: isConcreteML
       });
 
       updateStage('response', 'in-progress');
       await new Promise(resolve => setTimeout(resolve, 50));
       updateStage('response', 'completed', {
         duration: 50,
-        resultSize: '~1KB'
+        resultSize: isConcreteML ? '~10KB' : '~1KB'
       });
 
       updateStage('decryption', 'in-progress');
 
-      // Decrypt the result using HE utilities
+      // Decrypt the result using appropriate method
       const encryptedResult = inferenceResponse.data.encrypted_result;
-      const decryptedResult = await he.decryptResult(encryptedResult);
+      let decryptedResult;
+
+      if (isConcreteML) {
+        // Client-side decryption with Concrete ML
+        const concreteHE = getConcreteMLEncryption();
+        decryptedResult = await concreteHE.decryptResult(encryptedResult);
+      } else {
+        // Server-side decryption with TenSEAL (already decrypted by server)
+        const he = getHEInstance();
+        decryptedResult = await he.decryptResult(encryptedResult);
+      }
 
       await new Promise(resolve => setTimeout(resolve, 100));
       updateStage('decryption', 'completed', {
-        duration: 100
+        duration: 100,
+        clientSideDecryption: isConcreteML
       });
 
       const prediction = decryptedResult.prediction ?? 0;
@@ -183,7 +244,8 @@ function App() {
         duration: 0,
         prediction: String(prediction),
         confidence: (confidence * 100).toFixed(1) + '%',
-        totalTime: totalTime
+        totalTime: totalTime,
+        trueFHE: isConcreteML
       });
 
     } catch (err) {
