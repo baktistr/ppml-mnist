@@ -31,7 +31,7 @@ class HomomorphicEncryption:
 
     def __init__(
         self,
-        poly_modulus_degree: int = 16384,
+        poly_modulus_degree: int = 32768,
         coeff_mod_bit_sizes: list = [60, 40, 40, 40, 40, 60],
         global_scale: float = 2**40,
         security_level: int = 128
@@ -40,7 +40,7 @@ class HomomorphicEncryption:
         Initialize TenSEAL context with CKKS scheme.
 
         Args:
-            poly_modulus_degree: Degree of polynomial modulus (16384 for multiplicative depth)
+            poly_modulus_degree: Degree of polynomial modulus (32768 to handle multi-channel outputs)
             coeff_mod_bit_sizes: Bit sizes for coefficient modulus primes (6 primes for 4 multiplications)
             global_scale: Scale for encoding floating-point numbers
             security_level: Security level (128-bit recommended)
@@ -78,6 +78,9 @@ class HomomorphicEncryption:
             Tuple of (public_key_base64, secret_key_base64)
         """
         logger.info("Generating TenSEAL key pair...")
+
+        # Get the secret key object from context
+        self._secret_key = self.context.secret_key()
 
         # In TenSEAL, keys are part of the context
         # We serialize the public key for the client

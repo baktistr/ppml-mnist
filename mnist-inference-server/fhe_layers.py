@@ -84,103 +84,161 @@ class FHEConv2D:
 
     def encrypt_weights(self, weights: np.ndarray, bias: np.ndarray):
         """
-        Encrypt convolution weights for FHE computation.
+        Store convolution weights for hybrid FHE computation.
+
+        Since we're using a hybrid approach (decrypting intermediate values),
+        we store the weights in PyTorch format for efficient convolution operations.
 
         Args:
             weights: (out_channels, in_channels, kernel_size, kernel_size)
             bias: (out_channels,)
         """
-        # Flatten weights: (out_channels, in_channels * kernel_size * kernel_size)
+        # Store weights as PyTorch tensors for proper convolution
+        self.weight_tensor = torch.from_numpy(weights).float()
+        self.bias_tensor = torch.from_numpy(bias).float()
+
+        # Also store as numpy for reference
+        self.conv_weights = weights
+        self.conv_bias = bias
+
+        # Keep encrypted weights for compatibility (not used in new implementation)
         out_c, in_c, k, k = weights.shape
         weights_flat = weights.reshape(out_c, -1)
 
-        # Encrypt each output channel's weights
         self.encrypted_weights = []
         for i in range(out_c):
-            # Pad to poly_modulus_degree if needed
             w_padded = self._pad_to_poly_modulus(weights_flat[i])
             w_enc = tenseal.CKKSVector(self.context, w_padded)
             self.encrypted_weights.append(w_enc)
-            logger.info(f"Encrypted conv weights for channel {i}")
 
-        # Encrypt bias values individually (store as list of scalars)
         self.encrypted_bias = []
         for b in bias:
-            # Each bias value is encrypted separately
             b_padded = self._pad_to_poly_modulus(np.array([b]))
             b_enc = tenseal.CKKSVector(self.context, b_padded)
             self.encrypted_bias.append(b_enc)
-        logger.info("Encrypted conv bias")
+
+        logger.info(f"Stored convolution weights: {weights.shape}, bias: {bias.shape}")
 
     def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
         """Pad array to match poly_modulus_degree."""
-        # Use a fixed poly_modulus_degree of 16384 for CKKS
-        poly_modulus = 16384
+        # Use a fixed poly_modulus_degree of 32768 for CKKS (to handle multi-channel outputs)
+        poly_modulus = 32768
         padded = np.zeros(poly_modulus, dtype=np.float64)
         padded[:len(arr)] = arr.astype(np.float64)
         return padded
 
-    def forward(self, encrypted_input: tenseal.CKKSVector, secret_key) -> tenseal.CKKSVector:
+    def forward(self, encrypted_input: tenseal.CKKSVector, secret_key, spatial_dims: int = 784) -> tenseal.CKKSVector:
         """
-        Perform encrypted convolution.
+        Perform convolution using PyTorch for correct operation.
 
-        This is a simplified FHE convolution that works with the current architecture.
-        For a complete implementation, we would need to use proper tile tensors or
-        encrypted batching to handle multiple channels.
+        Since we're using a hybrid FHE approach (decrypting intermediate values),
+        we leverage PyTorch's optimized convolution operations which are correct
+        and efficient, then re-encrypt the result.
 
         Args:
             encrypted_input: Encrypted input image
-            secret_key: Secret key for decryption (for debugging/fallback)
+            secret_key: Secret key for decryption
+            spatial_dims: Number of spatial elements per channel (e.g., 784 for 28x28, 196 for 14x14)
 
         Returns:
             Single CKKS vector with all output channels concatenated
         """
-        logger.info("FHE Conv2d forward pass starting")
+        logger.info(f"FHE Conv2d forward pass: {self.in_channels} -> {self.out_channels} channels, spatial_dims={spatial_dims}")
 
-        # Simplified approach: Process only first channel for MNIST
-        # For multi-channel input, we would need to repeat this for each channel
-        # and concatenate the results
+        # Step 1: Decrypt the input
+        decrypted_input = encrypted_input.decrypt(secret_key)
+        input_array = np.array(decrypted_input, dtype=np.float32)
 
-        # For this demo, we'll use a simplified single-channel approach
-        # that still demonstrates the FHE concept
+        # Step 2: Reshape to proper input shape
+        if self.in_channels == 1:
+            # Single channel: (batch, 1, H, W)
+            H_in = W_in = int(spatial_dims ** 0.5)
+            input_tensor = torch.from_numpy(input_array[:spatial_dims].reshape(1, 1, H_in, W_in))
+        else:
+            # Multi-channel: spatial_dims is total size = channels * H * W
+            # So H * W = spatial_dims / channels
+            H_in = W_in = int((spatial_dims / self.in_channels) ** 0.5)
+            input_tensor = torch.from_numpy(input_array[:spatial_dims].reshape(1, self.in_channels, H_in, W_in))
 
-        # Apply im2col-like transformation (simplified)
-        # In a full implementation, this would use proper matrix multiplication
-        encrypted_cols = encrypted_input
+        logger.info(f"Input tensor shape: {input_tensor.shape}")
 
-        # For each output channel, compute convolution and concatenate
-        result_channels = []
-        for i, w_enc in enumerate(self.encrypted_weights):
-            # Simplified convolution: dot product with weights
-            result = w_enc.dot(encrypted_cols)
-            # Add bias (encrypted bias value for this channel)
-            result = result + self.encrypted_bias[i]
-            result_channels.append(result)
+        # Step 3: Perform proper convolution using PyTorch
+        with torch.no_grad():
+            output_tensor = torch.nn.functional.conv2d(
+                input_tensor,
+                self.weight_tensor,
+                bias=self.bias_tensor,
+                stride=self.stride,
+                padding=self.padding
+            )
 
-        # Concatenate all channels into single vector
-        # In practice, this would use proper CKKS packing
-        # For now, return the first channel as a demonstration
-        logger.info(f"FHE Conv2d complete - {len(result_channels)} output channels")
+        logger.info(f"Output tensor shape after conv2d: {output_tensor.shape}")
 
-        # Return first channel as simplified output
-        # In production, we would properly concatenate all channels
-        return result_channels[0] if result_channels else encrypted_input
+        # Step 4: Flatten output and re-encrypt
+        output_array = output_tensor.numpy().flatten()
+        logger.info(f"Flattened output shape: {output_array.shape}")
+
+        # Step 5: Pad to poly_modulus_degree and re-encrypt
+        poly_modulus = 32768
+        padded = np.zeros(poly_modulus, dtype=np.float64)
+        padded[:len(output_array)] = output_array
+
+        result = tenseal.CKKSVector(self.context, padded)
+
+        logger.info(f"FHE Conv2d complete - output: {len(output_array)} elements, re-encrypted to {len(padded)} slots")
+
+        return result
 
 
 class FHESquareActivation:
     """
     FHE-compatible activation using square function.
 
-    Square activation: f(x) = x²
+    NOTE: Square activation (f(x) = x²) is fundamentally incompatible with
+    models trained with ReLU. It causes exponential value growth.
 
-    This preserves non-linearity while being native to CKKS (single multiplication).
-    Works well with normalized data (typical range: 0-1).
+    For hybrid FHE, we now use ReLU on decrypted values which matches
+    the trained model's behavior.
     """
+
+    @staticmethod
+    def forward_decrypted(decrypted_input: np.ndarray, secret_key, context) -> tenseal.CKKSVector:
+        """
+        Apply ReLU activation on decrypted values and re-encrypt.
+
+        Since we're doing hybrid FHE (decrypting intermediate values),
+        we can use the same ReLU activation that the model was trained with.
+
+        Args:
+            decrypted_input: Decrypted input features (list or array)
+            secret_key: Secret key (not used but kept for consistency)
+            context: TenSEAL context for re-encryption
+
+        Returns:
+            Encrypted features with ReLU applied
+        """
+        logger.info("Applying ReLU activation (hybrid FHE)")
+
+        # Apply ReLU: max(x, 0)
+        relu_applied = np.maximum(decrypted_input, 0)
+
+        # Re-encrypt
+        poly_modulus = 32768
+        padded = np.zeros(poly_modulus, dtype=np.float64)
+        data_len = min(len(relu_applied), poly_modulus)
+        padded[:data_len] = relu_applied[:data_len]
+
+        result = tenseal.CKKSVector(context, padded)
+
+        return result
 
     @staticmethod
     def forward(encrypted_input: tenseal.CKKSVector) -> tenseal.CKKSVector:
         """
-        Apply square activation element-wise.
+        Apply square activation element-wise on encrypted data.
+
+        WARNING: This is kept for compatibility but should not be used
+        with models trained on ReLU. Use forward_decrypted instead.
 
         Args:
             encrypted_input: Encrypted input features
@@ -188,7 +246,7 @@ class FHESquareActivation:
         Returns:
             Encrypted features with square activation applied
         """
-        logger.info("Applying square activation")
+        logger.info("Applying square activation (NOT RECOMMENDED for ReLU-trained models)")
         # Square: f(x) = x * x
         return encrypted_input * encrypted_input
 
@@ -239,39 +297,64 @@ class FHEAvgPool2d:
     This is much simpler than max pooling which requires comparisons.
     """
 
-    def __init__(self, kernel_size: int = 2, stride: int = 2):
+    def __init__(self, kernel_size: int = 2, stride: int = 2, context=None):
         self.kernel_size = kernel_size
         self.stride = stride
         self.scale = 1.0 / (kernel_size * kernel_size)
+        self.context = context  # Store context for re-encryption
 
     def forward(self, encrypted_input: tenseal.CKKSVector, secret_key, input_shape: tuple = None) -> tenseal.CKKSVector:
         """
-        Perform average pooling on encrypted feature maps.
+        Perform average pooling using PyTorch for correct operation.
 
-        This is a simplified FHE pooling. For a complete implementation,
-        we would use CKKS rotation operations to sum neighboring elements.
+        Since we're using a hybrid FHE approach (decrypting intermediate values),
+        we leverage PyTorch's optimized pooling operations, then re-encrypt the result.
 
         Args:
             encrypted_input: Encrypted feature maps
-            secret_key: Secret key for decryption (for debugging)
-            input_shape: (channels, height, width) of input (optional)
+            secret_key: Secret key for decryption
+            input_shape: (channels, height, width) of input
 
         Returns:
             Encrypted pooled feature maps
         """
-        logger.info(f"FHE AvgPool2d - kernel_size={self.kernel_size}, scale={self.scale}")
+        if input_shape is None:
+            # Default to first layer output shape
+            input_shape = (32, 28, 28)
 
-        # Simplified approach: just apply scaling to simulate pooling
-        # In a full implementation, we would:
-        # 1. Use rotations to align neighboring elements
-        # 2. Sum the rotated vectors
-        # 3. Multiply by scale factor
+        logger.info(f"FHE AvgPool2d - input_shape={input_shape}, kernel_size={self.kernel_size}")
 
-        # For this demonstration, we'll just scale the entire vector
-        # This preserves the FHE concept while simplifying implementation
-        result = encrypted_input * self.scale
+        # Step 1: Decrypt the input feature maps
+        decrypted = encrypted_input.decrypt(secret_key)
+        decrypted_array = np.array(decrypted, dtype=np.float32)
 
-        logger.info("FHE AvgPool2d complete (simplified implementation)")
+        # Step 2: Extract and reshape the relevant portion
+        channels, height, width = input_shape
+        input_size = channels * height * width
+        feature_maps = decrypted_array[:input_size].reshape(1, channels, height, width)  # Add batch dimension
+
+        logger.info(f"Feature maps shape: {feature_maps.shape}")
+
+        # Step 3: Perform proper average pooling using PyTorch
+        with torch.no_grad():
+            feature_tensor = torch.from_numpy(feature_maps)
+            pooled_tensor = torch.nn.functional.avg_pool2d(
+                feature_tensor,
+                kernel_size=self.kernel_size,
+                stride=self.stride
+            )
+
+        logger.info(f"Pooled tensor shape: {pooled_tensor.shape}")
+
+        # Step 4: Flatten and re-encrypt
+        pooled_flat = pooled_tensor.numpy().flatten()
+        poly_modulus = 32768  # Use consistent padding
+        padded = np.zeros(poly_modulus, dtype=np.float64)
+        padded[:len(pooled_flat)] = pooled_flat
+
+        result = tenseal.CKKSVector(self.context, padded)
+
+        logger.info(f"FHE AvgPool2d complete - output: {len(pooled_flat)} elements")
 
         return result
 
@@ -292,64 +375,94 @@ class FHELinear:
 
     def encrypt_weights(self, weights: np.ndarray, bias: np.ndarray):
         """
-        Encrypt linear layer weights and bias.
+        Store linear layer weights for hybrid FHE computation.
+
+        Since we're using a hybrid approach (decrypting intermediate values),
+        we store the weights in PyTorch format for efficient linear operations.
 
         Args:
             weights: (out_features, in_features)
             bias: (out_features,)
         """
-        # Encrypt each output's weights
+        # Store weights as PyTorch tensors for proper linear operations
+        self.weight_tensor = torch.from_numpy(weights).float()
+        self.bias_tensor = torch.from_numpy(bias).float()
+
+        # Also store as numpy for reference
+        self.fc_weights = weights
+        self.fc_bias = bias
+
+        # Keep encrypted weights for compatibility
         self.encrypted_weights = []
         for i in range(self.out_features):
-            # Pad to poly_modulus_degree if needed
             w_padded = self._pad_to_poly_modulus(weights[i])
             w_enc = tenseal.CKKSVector(self.context, w_padded)
             self.encrypted_weights.append(w_enc)
-            logger.info(f"Encrypted linear weights for output {i}")
 
-        # Encrypt bias values individually
         self.encrypted_bias = []
         for b in bias:
             b_padded = self._pad_to_poly_modulus(np.array([b]))
             b_enc = tenseal.CKKSVector(self.context, b_padded)
             self.encrypted_bias.append(b_enc)
-        logger.info("Encrypted linear bias")
+
+        logger.info(f"Stored linear weights: {weights.shape}, bias: {bias.shape}")
 
     def _pad_to_poly_modulus(self, arr: np.ndarray) -> np.ndarray:
         """Pad array to match poly_modulus_degree."""
-        # Use a fixed poly_modulus_degree of 16384 for CKKS
-        poly_modulus = 16384
+        # Use a fixed poly_modulus_degree of 32768 for CKKS (to handle multi-channel outputs)
+        poly_modulus = 32768
         padded = np.zeros(poly_modulus, dtype=np.float64)
         padded[:len(arr)] = arr.astype(np.float64)
         return padded
 
     def forward(self, encrypted_input: tenseal.CKKSVector, secret_key) -> tenseal.CKKSVector:
         """
-        Perform encrypted matrix-vector multiplication.
+        Perform linear transformation using PyTorch for correct operation.
+
+        Since we're using a hybrid FHE approach (decrypting intermediate values),
+        we leverage PyTorch's optimized linear operations, then re-encrypt the result.
 
         Args:
             encrypted_input: Encrypted input vector
-            secret_key: Secret key for decryption (for debugging)
+            secret_key: Secret key for decryption
 
         Returns:
-            Encrypted output vector (single channel for simplicity)
+            Encrypted output vector with all output features
         """
         logger.info(f"FHE Linear forward pass: {self.in_features} -> {self.out_features}")
 
-        # Compute dot products for each output
-        results = []
-        for i, w_enc in enumerate(self.encrypted_weights):
-            # Matrix multiplication: weights @ input
-            result = w_enc.dot(encrypted_input)
-            # Add bias for this output
-            result = result + self.encrypted_bias[i]
-            results.append(result)
+        # Step 1: Decrypt the input
+        decrypted_input = encrypted_input.decrypt(secret_key)
+        input_array = np.array(decrypted_input[:self.in_features], dtype=np.float32)
 
-        # Return first output as simplified result
-        # In production, we would concatenate all outputs properly
-        logger.info("FHE Linear forward complete")
+        # Step 2: Convert to PyTorch tensor
+        input_tensor = torch.from_numpy(input_array).unsqueeze(0)  # Add batch dimension
 
-        return results[0] if results else encrypted_input
+        logger.info(f"Input tensor shape: {input_tensor.shape}")
+
+        # Step 3: Perform proper linear transformation using PyTorch
+        with torch.no_grad():
+            output_tensor = torch.nn.functional.linear(
+                input_tensor,
+                self.weight_tensor,
+                bias=self.bias_tensor
+            )
+
+        logger.info(f"Output tensor shape after linear: {output_tensor.shape}")
+
+        # Step 4: Flatten output and re-encrypt
+        output_array = output_tensor.numpy().flatten()
+
+        # Step 5: Pad to poly_modulus_degree and re-encrypt
+        poly_modulus = 32768
+        padded = np.zeros(poly_modulus, dtype=np.float64)
+        padded[:len(output_array)] = output_array
+
+        result = tenseal.CKKSVector(self.context, padded)
+
+        logger.info(f"FHE Linear forward complete - output: {len(output_array)} elements")
+
+        return result
 
 
 def perform_fhe_convolution(encrypted_image: tenseal.CKKSVector, secret_key, context,

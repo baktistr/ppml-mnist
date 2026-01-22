@@ -86,7 +86,7 @@ class FHEMNISTCNN:
         """Initialize FHE layer objects."""
         self.conv1 = FHEConv2D(self.context, 1, 32, kernel_size=3, padding=1)
         self.activation = FHESquareActivation()
-        self.pool = FHEAvgPool2d(kernel_size=2, stride=2)
+        self.pool = FHEAvgPool2d(kernel_size=2, stride=2, context=self.context)
         self.conv2 = FHEConv2D(self.context, 32, 64, kernel_size=3, padding=1)
         self.fc1 = FHELinear(self.context, 64 * 7 * 7, 128)
         self.fc2 = FHELinear(self.context, 128, 10)
@@ -131,8 +131,15 @@ class FHEMNISTCNN:
         decrypted = encrypted_vec.decrypt(secret_key)
         decrypted_array = np.array(decrypted, dtype=np.float64)
 
+        # Get the actual data length (non-zero values or meaningful data)
+        # For safety, we'll pad to poly_modulus_degree to maintain consistency
+        poly_modulus_degree = 32768
+        padded = np.zeros(poly_modulus_degree, dtype=np.float64)
+        data_len = min(len(decrypted_array), poly_modulus_degree)
+        padded[:data_len] = decrypted_array[:data_len]
+
         # Re-encrypt with fresh context
-        rescaled = tenseal.CKKSVector(self.context, decrypted_array)
+        rescaled = tenseal.CKKSVector(self.context, padded)
         logger.info("Ciphertext rescaled successfully")
 
         return rescaled
@@ -158,8 +165,8 @@ class FHEMNISTCNN:
         # Normalize to [0, 1]
         normalized = image_flat / 255.0
 
-        # Pad to match poly_modulus_degree (16384 for updated config)
-        poly_modulus_degree = 16384
+        # Pad to match poly_modulus_degree (32768 for multi-channel support)
+        poly_modulus_degree = 32768
         padded = np.zeros(poly_modulus_degree, dtype=np.float64)
         padded[:len(normalized)] = normalized
 
@@ -198,12 +205,13 @@ class FHEMNISTCNN:
 
         # Layer 1: Conv1 + Activation + Pool
         logger.info("Layer 1: Conv1 (1->32 channels, 3x3)")
-        x = self.conv1.forward(encrypted_input, secret_key)
+        x = self.conv1.forward(encrypted_input, secret_key, spatial_dims=784)
         logger.info(f"Layer 1 output shape: {x.size()} encrypted values")
 
-        # Activation
-        logger.info("Layer 1: Square Activation")
-        x = self.activation.forward(x)
+        # Activation - Use ReLU on decrypted values (hybrid FHE)
+        logger.info("Layer 1: ReLU Activation (hybrid FHE)")
+        decrypted = x.decrypt(secret_key)
+        x = self.activation.forward_decrypted(decrypted, secret_key, self.context)
         logger.info(f"Layer 1 output after activation: {x.size()} values")
 
         # Pooling
@@ -216,15 +224,16 @@ class FHEMNISTCNN:
 
         # Layer 2: Conv2 + Activation + Pool
         logger.info("Layer 2: Conv2 (32->64 channels, 3x3)")
-        x = self.conv2.forward(x, secret_key)
+        x = self.conv2.forward(x, secret_key, spatial_dims=6272)  # 32 channels * 14 * 14 = 6272 after pooling
         logger.info(f"Layer 2 output shape: {x.size()} encrypted values")
 
-        # Rescale BEFORE square activation (Conv2 was 1 multiplication, need to reset before Square)
+        # Rescale BEFORE activation (Conv2 was 1 multiplication)
         x = self._rescale_ciphertext(x, secret_key)
 
-        # Activation
-        logger.info("Layer 2: Square Activation")
-        x = self.activation.forward(x)
+        # Activation - Use ReLU on decrypted values
+        logger.info("Layer 2: ReLU Activation (hybrid FHE)")
+        decrypted = x.decrypt(secret_key)
+        x = self.activation.forward_decrypted(decrypted, secret_key, self.context)
         logger.info(f"Layer 2 output after activation: {x.size()} values")
 
         # Pooling
@@ -240,12 +249,13 @@ class FHEMNISTCNN:
         x = self.fc1.forward(x, secret_key)
         logger.info(f"Layer 3 output: {x.size()} values")
 
-        # Rescale BEFORE square activation (FC1 was 1 multiplication)
+        # Rescale BEFORE activation (FC1 was 1 multiplication)
         x = self._rescale_ciphertext(x, secret_key)
 
-        # Activation
-        logger.info("Layer 3: Square Activation")
-        x = self.activation.forward(x)
+        # Activation - Use ReLU on decrypted values
+        logger.info("Layer 3: ReLU Activation (hybrid FHE)")
+        decrypted = x.decrypt(secret_key)
+        x = self.activation.forward_decrypted(decrypted, secret_key, self.context)
         logger.info(f"Layer 3 output after activation: {x.size()} values")
 
         # Layer 4: FC2 (output logits)
