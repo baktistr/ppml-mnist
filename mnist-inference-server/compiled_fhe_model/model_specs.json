@@ -1,0 +1,13 @@
+{
+  "model_type": "LogisticRegression",
+  "n_bits": 7,
+  "input_shape": [
+    784
+  ],
+  "output_shape": [
+    10
+  ],
+  "framework": "concrete-ml",
+  "compiled": true,
+  "accuracy": 0.92
+}

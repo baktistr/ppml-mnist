@@ -18,6 +18,7 @@ import tenseal
 from encryption import initialize_he_on_startup, get_he_instance, HomomorphicEncryption
 from fhe_cnn import FHEMNISTCNN, create_fhe_model
 from concrete_model import get_concrete_server, is_concrete_ml_available
+from simulated_fhe import get_simulated_fhe_server, is_simulated_fhe_available
 
 
 class MNISTCNN(nn.Module):
@@ -249,7 +250,8 @@ async def predict_with_he(request: HEInferenceRequest):
         encrypted_bytes = base64.b64decode(request.encrypted_image)
 
         # Try to parse as TenSEAL CKKS first
-        if framework == "tenseal":
+        # Accept multiple framework names that map to TenSEAL
+        if framework in ["tenseal", "tenseal-true-fhe", "tenseal-hybrid"]:
             try:
                 # Try to load as CKKS encrypted data
                 encrypted_vector = tenseal.CKKSVector.load(he.context, encrypted_bytes)
@@ -288,7 +290,7 @@ async def predict_with_he(request: HEInferenceRequest):
                 framework="tenseal"
             )
 
-        elif framework == "concrete":
+        elif framework in ["concrete", "concrete-ml"]:
             # Concrete ML support coming soon
             raise HTTPException(
                 status_code=501,
@@ -297,7 +299,7 @@ async def predict_with_he(request: HEInferenceRequest):
         else:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown framework: {framework}. Use 'tenseal' or 'concrete'"
+                detail=f"Unknown framework: {framework}. Use 'tenseal', 'tenseal-true-fhe', 'concrete-ml', or 'concrete'"
             )
 
     except HTTPException:
