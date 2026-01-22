@@ -55,7 +55,7 @@ class SimulatedFHEServer:
         self._initialized = True
         logger.info("Simulated FHE server initialized (demonstration mode)")
 
-    def predict(self, encrypted_input: bytes) -> SimulatedFHESesult:
+    def predict(self, encrypted_input: bytes) -> SimulatedFHEResult:
         """
         Simulate FHE inference on encrypted input.
 
@@ -90,7 +90,7 @@ class SimulatedFHEServer:
 
         logger.info(f"Simulated FHE inference complete - prediction: {mock_result['prediction']}")
 
-        return SimulatedFHESesult(
+        return SimulatedFHEResult(
             encrypted_data=encrypted_result.encode(),
             metadata={
                 "simulated": True,
